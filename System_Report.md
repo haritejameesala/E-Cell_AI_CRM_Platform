@@ -56,6 +56,25 @@ The AI layer uses:
 - rule-based factual routing for simple CRM questions
 - confidence and grounding logic for hallucination risk control
 
+### 2.3.1 Prompt Management
+
+Prompt templates are documented under:
+
+```text
+models/prompts/
+```
+
+including:
+
+- system prompt
+- customer agent prompt
+- ticket summarization prompt
+- deterministic factual routing prompt
+
+These templates mirror the prompts currently implemented inside `src/agents.py`.
+
+Separating prompt documentation from application logic improves maintainability while preserving the existing runtime behaviour.
+
 ### 2.4 Dashboard Layer
 
 Streamlit displays:
@@ -810,6 +829,7 @@ Recommended improvements:
 - Train a churn model using real churn labels.
 - Replace static tokens with JWT/OAuth.
 - Add background jobs for metric precomputation.
+- Externalize runtime prompt loading so prompt templates can be updated without modifying application source code.
 
 ## 23. Conclusion
 

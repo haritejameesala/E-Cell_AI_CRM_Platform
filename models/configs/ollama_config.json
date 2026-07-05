@@ -1,0 +1,11 @@
+{
+  "provider": "Ollama",
+  "model": "llama3",
+  "host": "http://localhost:11434",
+  "temperature": 0.2,
+  "num_ctx": 4096,
+  "num_predict": 512,
+  "top_p": 0.9,
+  "repeat_penalty": 1.1,
+  "timeout": 120
+}

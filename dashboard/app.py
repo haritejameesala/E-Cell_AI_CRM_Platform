@@ -51,7 +51,7 @@ st.markdown("""
         background: #16213e; border-left: 4px solid #64ffda; border-radius: 6px;
         padding: 12px 16px; color: #8892b0; font-size: 13px; margin: 8px 0;
     }
-    #MainMenu, footer, header { visibility: hidden; }
+    #MainMenu, footer { visibility: hidden; }
     .stDeployButton { display: none; }
     [data-testid="metric-container"] {
         background: #1a1f2e; border: 1px solid #2d3748; border-radius: 10px; padding: 12px;

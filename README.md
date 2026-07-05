@@ -17,29 +17,47 @@ The system is designed as a practical demo CRM: the database stores customers, t
 
 ```text
 task3/
-  api/
-    app.py                 FastAPI routes, RBAC, audit metadata, latency telemetry
-  dashboard/
-    app.py                 Streamlit dashboard and Plotly visualizations
-  data/
-    generate_data.py       Synthetic data generator
-    customers.csv          Dataset export/reference file
-    tickets.csv            Dataset export/reference file
-    interactions.csv       Dataset export/reference file
-  src/
-    agents.py              Ollama agent, ticket summarization, confidence scoring, LangGraph routing
-    cohort.py              Cohort analysis, churn score, retention curves, re-engagement
-    crm.py                 CRUD operations, timeline, CRM profile context
-    db.py                  SQLAlchemy engine/session setup
-    evaluation.py          Resolution, latency, agent quality, cohort evaluation metrics
-    heart.py               HEART framework metrics
-    memory.py              Customer memory and health signals
-    models.py              SQLAlchemy models
-    schemas.py             Pydantic schemas
-    segmentation.py        Configurable segmentation engine
-  README.md
-  System_Report.md
-  requirements.txt
+│
+├── api/
+│   └── app.py
+│
+├── dashboard/
+│   └── app.py
+│
+├── data/
+│   ├── customers.csv
+│   ├── tickets.csv
+│   ├── interactions.csv
+│   └── generate_data.py
+│
+├── models/
+│   ├── configs/
+│   │   └── ollama_config.json
+│   │
+│   ├── prompts/
+│   │   ├── system.md
+│   │   ├── customer_agent.md
+│   │   ├── ticket_summary.md
+│   │   ├── factual_router.md
+│   │   └── README.md
+│   │
+│   └── README.md
+│
+├── src/
+│   ├── agents.py
+│   ├── crm.py
+│   ├── memory.py
+│   ├── cohort.py
+│   ├── heart.py
+│   ├── segmentation.py
+│   ├── evaluation.py
+│   ├── models.py
+│   ├── schemas.py
+│   └── db.py
+│
+├── README.md
+├── System_Report.md
+└── requirements.txt
 ```
 
 ## Data Model
@@ -210,6 +228,76 @@ If the query requires explanation, summarization, or reasoning, the system build
 - strict instructions not to invent facts
 
 Then it sends the prompt to Ollama/Llama3.
+
+### LangGraph Workflow
+
+The CRM agent uses a deterministic workflow before invoking the LLM.
+
+```text
+Customer Query
+        │
+        ▼
+Intent Classification
+        │
+ ┌──────┴────────┐
+ │               │
+ ▼               ▼
+Factual      Reasoning
+ │               │
+ ▼               ▼
+SQL Lookup   CRM Context
+ │               │
+ └──────┬────────┘
+        ▼
+  CRM Response
+```
+
+This architecture minimizes hallucination risk by answering factual questions directly from CRM records while reserving the LLM for analytical and reasoning tasks.
+
+## Prompt Templates
+
+The project includes reusable prompt templates under:
+
+models/prompts/
+
+These files document the prompts used by the CRM assistant, ticket summarizer and deterministic factual router.
+
+The runtime implementation currently embeds the same prompts inside `src/agents.py` to preserve backward compatibility.
+
+## Model Configuration
+
+The directory
+
+models/configs/
+
+contains model configuration files used for local LLM deployment.
+
+Example
+
+- ollama_config.json
+
+This documents the default Ollama model, host and inference parameters used by the project.
+
+### Current Ollama Configuration
+
+The current local LLM configuration uses:
+
+| Parameter | Value |
+|------------|-------|
+| Provider | Ollama |
+| Model | Llama 3 |
+| Host | http://localhost:11434 |
+| Temperature | 0.2 |
+| Context Window | 4096 |
+| Max Prediction Tokens | 512 |
+
+The configuration is documented under:
+
+```text
+models/configs/ollama_config.json
+```
+
+These values can be modified independently of the application source code.
 
 ## Confidence Score
 
