@@ -3,7 +3,7 @@ from datetime import date, datetime
 from typing import Optional, List, Dict, Any
 
 
-# ─── Input Schemas ─────────────────────────────────────────────────────────────
+# ── Request bodies ──
 
 class CustomerCreate(BaseModel):
     name: str
@@ -35,7 +35,7 @@ class TicketUpdate(BaseModel):
     status: str
 
 
-# ─── Response Schemas ──────────────────────────────────────────────────────────
+# ── Response bodies ──
 
 class CustomerResponse(BaseModel):
     id: int
@@ -88,8 +88,8 @@ class AgentQueryResponse(BaseModel):
     agent_id: str
     processing_latency: float
     timestamp: datetime
-    # ── Additive fields (Features 1 & 7) - existing fields above are
-    # unchanged, so old consumers reading only those keep working. ──────────
+    # These were added later on top of the original shape above - kept
+    # optional so old clients that only read the fields above don't break.
     sources: Optional[List[Dict[str, Any]]] = None
     confidence_method: Optional[str] = None
     confidence_breakdown: Optional[Dict[str, Any]] = None

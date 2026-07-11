@@ -7,7 +7,7 @@ from src.models import Customer, Ticket, Interaction
 from src.schemas import CustomerCreate, TicketCreate
 
 
-# ─── Customer CRUD ────────────────────────────────────────────────────────────
+# ── Customer CRUD ──
 
 def create_customer(db: Session, data: CustomerCreate) -> Customer:
     customer = Customer(**data.model_dump())
@@ -45,7 +45,7 @@ def delete_customer(db: Session, customer_id: int) -> bool:
     return True
 
 
-# ─── Ticket CRUD + Lifecycle ──────────────────────────────────────────────────
+# ── Ticket CRUD + lifecycle ──
 
 def create_ticket(db: Session, data: TicketCreate) -> Ticket:
     ticket = Ticket(**data.model_dump(), created_at=datetime.utcnow())
@@ -76,7 +76,8 @@ def update_ticket_status(db: Session, ticket_id: int, status: str) -> Optional[T
     ticket.status = status
     ticket.updated_at = datetime.utcnow()
 
-    # Set resolved_at timestamp when ticket is resolved or closed
+    # Only stamp resolved_at the first time we hit a resolved/closed state -
+    # don't clobber it if the ticket gets touched again later.
     if status in ["Resolved", "Closed"] and not ticket.resolved_at:
         ticket.resolved_at = datetime.utcnow()
 
@@ -94,15 +95,18 @@ def delete_ticket(db: Session, ticket_id: int) -> bool:
     return True
 
 
-# ─── Customer Segmentation ────────────────────────────────────────────────────
+# ── Segmentation by industry ──
+# This is the original industry-only version, kept as-is for the
+# /customers/segments/by-industry route. src/segmentation.py has a more
+# general version that handles other dimensions (tier, tenure, etc.) -
+# didn't want to touch this one and risk changing its response shape.
 
 def get_customer_segments(db: Session):
     customers = db.query(Customer).all()
 
-    # ── Batched ticket counts (fixes N+1) ───────────────────────────────────
-    # Previously this issued one COUNT query per customer inside the loop
-    # below (N+1). A single grouped query gives us every customer's ticket
-    # count up front, and the loop just does an O(1) dict lookup.
+    # One grouped query for ticket counts instead of a COUNT per customer
+    # in the loop below - this used to be an N+1 and got slow once the
+    # customer table grew.
     ticket_counts = dict(
         db.query(Ticket.customer_id, func.count(Ticket.id))
         .group_by(Ticket.customer_id)
@@ -112,7 +116,6 @@ def get_customer_segments(db: Session):
     segments = {}
 
     for customer in customers:
-        # Segment by industry
         industry = customer.industry
         if industry not in segments:
             segments[industry] = {
@@ -139,17 +142,16 @@ def get_customer_segments(db: Session):
         if customer.status == "Churned":
             segments[industry]["churned_count"] += 1
 
-    # Compute averages
     for seg in segments.values():
         scores = [c["engagement_score"] for c in seg["customers"]]
         seg["avg_engagement"] = round(sum(scores) / len(scores), 2) if scores else 0
         seg["total_customers"] = len(seg["customers"])
-        del seg["customers"]  # keep response lean
+        del seg["customers"]  # don't ship the full customer list in the response
 
     return list(segments.values())
 
 
-# ─── Customer Timeline ────────────────────────────────────────────────────────
+# ── Customer timeline ──
 
 def get_customer_timeline(db: Session, customer_id: int):
     tickets = (
@@ -189,7 +191,7 @@ def get_customer_timeline(db: Session, customer_id: int):
             "timestamp": i.timestamp.isoformat() if i.timestamp else None,
         })
 
-    # Sort all events chronologically
+    # Newest first, tickets and interactions interleaved
     timeline.sort(
         key=lambda x: x["timestamp"] or "",
         reverse=True
@@ -202,22 +204,20 @@ def get_customer_timeline(db: Session, customer_id: int):
     }
 
 
-# ─── CRM Context (for AI Agent grounding) ─────────────────────────────────────
+# ── CRM context for the AI agent ──
 
 def get_customer_context(db: Session, customer_id: int) -> dict:
     """
-    Fetches the core CRM profile fields for a customer in a single query.
+    Pulls the core Customer profile fields the agent needs for grounding.
 
-    This is deliberately narrow - it only pulls the Customer row. Ticket and
-    interaction aggregates (open/resolved/escalated counts, sentiment, CSAT,
-    etc.) are already computed by memory.get_customer_memory(), so we avoid
-    re-querying tickets/interactions here and instead let the AI agent
-    combine this profile with that memory dict.
+    Deliberately just the Customer row - ticket/interaction aggregates
+    already live in memory.get_customer_memory(), so we don't duplicate
+    those queries here. The agent combines this profile with that memory
+    dict itself.
 
-    Extensibility note: if the agent later needs account-management fields
-    that don't exist on the Customer model yet (e.g. account manager, ARR,
-    MRR, renewal date), this is the natural place to add them once those
-    columns/tables exist - no other call site should need to change.
+    If we ever need account-management fields that don't exist on Customer
+    yet (account manager, ARR, renewal date, etc.), this is where they'd
+    get added.
     """
     customer = db.query(Customer).filter(Customer.id == customer_id).first()
     if not customer:

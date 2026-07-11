@@ -8,11 +8,12 @@ from src.models import Customer, Ticket, Interaction
 
 def heart_metrics(db: Session) -> dict:
     """
-    Computes the HEART framework scores.
+    Computes the HEART scores (Happiness, Engagement, Adoption, Retention,
+    Task Success).
 
-    API response shape and field names are UNCHANGED from the original
-    implementation - only the internal calculations for Engagement and
-    Task_Success were made richer (see the comments in each section).
+    The response shape hasn't changed from the original version - just the
+    guts of how Engagement and Task_Success get calculated got richer over
+    time (see the comments in each section below).
     """
     customers = db.query(Customer).all()
     tickets = db.query(Ticket).all()
@@ -21,38 +22,34 @@ def heart_metrics(db: Session) -> dict:
     total_customers = len(customers)
     total_tickets = len(tickets)
 
-    # ── H — HAPPINESS ─────────────────────────────────────────────────────────
-    # Signal: average CSAT score (1-5 scale, normalised to 0-100)
-    # + average NPS score (0-10 scale, normalised to 0-100)
+    # ── Happiness ──
+    # Average CSAT (1-5, normalised to 0-100) blended with the average
+    # per-customer 0-10 rating (also normalised to 0-100).
     #
-    # NOTE: `nps_score` here is each individual customer's own 0-10
-    # recommendation rating (their per-customer survey response), not the
-    # traditional aggregate Net Promoter Score (-100 to +100, computed as
-    # %promoters - %detractors across a population). Averaging these
-    # per-customer 0-10 ratings and normalising to 0-100 is a reasonable
-    # happiness proxy, but it should not be presented as "NPS" in the
-    # traditional sense in a report - call it "average customer rating"
-    # to avoid confusion with the standard metric.
+    # Worth flagging: `nps_score` here is each customer's own 0-10 survey
+    # answer, not a real aggregate NPS (%promoters - %detractors, -100 to
+    # +100). Averaging these individual ratings is a reasonable happiness
+    # proxy, but don't label it "NPS" in a report without that caveat.
     csat_scores = [i.csat_score for i in interactions if i.csat_score is not None]
     avg_csat = (sum(csat_scores) / len(csat_scores)) if csat_scores else 0
-    csat_normalised = (avg_csat / 5) * 100  # convert to 0-100
+    csat_normalised = (avg_csat / 5) * 100  # to 0-100 scale
 
     nps_scores = [c.nps_score for c in customers if c.nps_score is not None]
     avg_nps = (sum(nps_scores) / len(nps_scores)) if nps_scores else 0
-    nps_normalised = (avg_nps / 10) * 100   # convert to 0-100
+    nps_normalised = (avg_nps / 10) * 100   # to 0-100 scale
 
     happiness = round((csat_normalised + nps_normalised) / 2, 2)
 
-    # ── E — ENGAGEMENT ────────────────────────────────────────────────────────
-    # Previously: a single signal (% customers with an interaction in the
-    # last 30 days). That undercounts engagement for customers who are
-    # active via tickets but haven't had a logged interaction, and ignores
-    # the overall engagement_score baseline we already track per customer.
+    # ── Engagement ──
+    # Used to be just "% customers with an interaction in the last 30
+    # days", but that misses customers who are active via tickets and
+    # haven't logged a fresh interaction, and it ignores the baseline
+    # engagement_score we already track per customer.
     #
-    # Now: a weighted blend of three signals -
+    # Now it's a blend of three signals:
     #   50% recent interactions   - % customers with an interaction in last 30 days
     #   25% recent ticket activity - % customers with a ticket touched in last 30 days
-    #   25% baseline activity     - average of each customer's engagement_score
+    #   25% baseline activity     - average engagement_score across everyone
     thirty_days_ago = datetime.now() - timedelta(days=30)
 
     active_interactors = (
@@ -85,13 +82,11 @@ def heart_metrics(db: Session) -> dict:
         2,
     )
 
-    # ── A — ADOPTION ──────────────────────────────────────────────────────────
-    # Signal: % of customers who have raised at least 1 ticket.
-    # Note: this measures SUPPORT adoption specifically (i.e. customers who
-    # have engaged with the support/ticketing system at all), not product
-    # feature adoption - we don't track per-feature usage events, so ticket
-    # creation is the closest available proxy. Kept as-is; only the comment
-    # is clarified per the "rename internal comments" request.
+    # ── Adoption ──
+    # % of customers who've raised at least one ticket. This is measuring
+    # SUPPORT adoption, not product feature adoption - we don't have
+    # per-feature usage events, so ticket creation is the best proxy
+    # available.
     customers_with_tickets = (
         db.query(Ticket.customer_id)
         .distinct()
@@ -101,9 +96,9 @@ def heart_metrics(db: Session) -> dict:
         (customers_with_tickets / total_customers * 100) if total_customers else 0, 2
     )
 
-    # ── R — RETENTION ─────────────────────────────────────────────────────────
-    # Signal: % of customers who signed up 90+ days ago and are still Active
-    # (distinct from Adoption — this measures long-term stickiness)
+    # ── Retention ──
+    # % of customers signed up 90+ days ago who are still Active - a
+    # longer-horizon stickiness signal, separate from Engagement above.
     cutoff_date = date.today() - timedelta(days=90)
     tenured_customers = [
         c for c in customers if c.signup_date <= cutoff_date
@@ -115,12 +110,11 @@ def heart_metrics(db: Session) -> dict:
         (retained / len(tenured_customers) * 100) if tenured_customers else 0, 2
     )
 
-    # ── T — TASK SUCCESS ──────────────────────────────────────────────────────
-    # Signal: % of tickets that reached Resolved or Closed status.
-    # Internally we also compute average resolution time (created_at ->
-    # resolved_at) as a supporting metric. It's surfaced as an extra field
-    # below (avg_resolution_hours) but Task_Success itself is unchanged, so
-    # existing consumers reading only Task_Success are unaffected.
+    # ── Task Success ──
+    # % of tickets that ended Resolved or Closed. We also compute average
+    # resolution time as a bonus stat (avg_resolution_hours below) but
+    # Task_Success itself is unchanged, so anyone only reading that field
+    # is unaffected.
     resolved_tickets = [t for t in tickets if t.status in ["Resolved", "Closed"]]
     task_success = round(
         (len(resolved_tickets) / total_tickets * 100) if total_tickets else 0, 2
@@ -157,12 +151,12 @@ def heart_metrics(db: Session) -> dict:
             "Retention": "% customers signed up 90+ days ago still Active",
             "Task_Success": "% tickets in Resolved or Closed status",
         },
-        # Additive internal metric - not part of the original schema, safe
-        # for existing consumers that only read the fields above.
+        # Not part of the original schema - safe to add since old consumers
+        # only ever read the fields above.
         "avg_resolution_hours": avg_resolution_hours,
-        # ── Additive (Feature 5): trend history + breakdowns. Existing
-        # fields above are untouched, so old consumers keep working exactly
-        # as before; new consumers can opt into these richer views.
+        # Trend history + breakdowns, added on top of the original scores.
+        # Old consumers reading just the top-level fields are unaffected;
+        # new ones can opt into these for richer dashboards.
         "trend": heart_trend(db),
         "by_agent": heart_by_agent(db),
         "by_ticket_category": heart_by_category(db),
@@ -171,7 +165,7 @@ def heart_metrics(db: Session) -> dict:
 
 
 def heart_metrics_by_cohort(db: Session) -> list:
-    """HEART scores broken down per signup-month cohort."""
+    """Same HEART formulas as heart_metrics(), but broken out per signup-month cohort."""
     customers = db.query(Customer).all()
     cohorts: dict = {}
 
@@ -190,11 +184,11 @@ def heart_metrics_by_cohort(db: Session) -> list:
             Interaction.customer_id.in_(ids)
         ).all()
 
-        # Happiness
         csat = [i.csat_score for i in interactions if i.csat_score]
         happiness = round((sum(csat) / len(csat) / 5 * 100) if csat else 0, 2)
 
-        # Engagement (weighted blend, same signals as heart_metrics)
+        # Same three-signal blend as the top-level Engagement above, just
+        # scoped to this cohort's members.
         thirty_days_ago = datetime.now() - timedelta(days=30)
         eng_ids = set(
             i.customer_id for i in interactions
@@ -219,17 +213,14 @@ def heart_metrics_by_cohort(db: Session) -> list:
             2,
         )
 
-        # Adoption (% of cohort with at least 1 support ticket)
         ticket_ids = set(t.customer_id for t in tickets)
         adoption = round(len(ticket_ids) / total * 100 if total else 0, 2)
 
-        # Retention
         cutoff = date.today() - timedelta(days=90)
         tenured = [c for c in members if c.signup_date <= cutoff]
         retained = sum(1 for c in tenured if c.status == "Active")
         retention = round(retained / len(tenured) * 100 if tenured else 0, 2)
 
-        # Task Success
         resolved = [t for t in tickets if t.status in ["Resolved", "Closed"]]
         task_success = round(len(resolved) / len(tickets) * 100 if tickets else 0, 2)
 
@@ -256,7 +247,7 @@ def heart_metrics_by_cohort(db: Session) -> list:
     return results
 
 
-# ─── Trend history (Feature 5) ─────────────────────────────────────────────────
+# ── Trend history ──
 
 def _week_start(d: date) -> date:
     """Monday of the ISO week containing `d` - used as the weekly bucket key."""
@@ -265,24 +256,25 @@ def _week_start(d: date) -> date:
 
 def heart_trend(db: Session, weeks: int = 8, months: int = 6) -> dict:
     """
-    Weekly and monthly trend arrays for Happiness, Engagement, Task_Success.
+    Weekly and monthly time series for Happiness, Engagement, and
+    Task_Success.
 
-    DATA AVAILABILITY NOTE: Retention (90+ day tenure & still Active) reflects
-    a customer's CURRENT status, not a historical snapshot per period, so we
-    can't reconstruct a true historical Retention trend from current data
-    alone (same limitation documented in cohort.py's retention_curve). It is
-    therefore omitted from the trend arrays here rather than fabricated;
-    Retention itself is still reported as a single current value in
-    heart_metrics().
+    Retention isn't included here on purpose: we only ever store a
+    customer's CURRENT status, never a snapshot of their status at past
+    points in time (same limitation as the retention curve in cohort.py),
+    so there's no way to honestly reconstruct a historical Retention
+    trend from this data. Rather than fake it, we just leave it out of
+    the trend arrays - heart_metrics() still reports current Retention as
+    a single value.
 
-    Bucketing:
-      - Happiness  <- avg CSAT (normalised 0-100) of interactions per period
-      - Engagement <- % of customers with >=1 interaction in that period
+    How each metric is bucketed per period:
+      - Happiness    <- avg CSAT (0-100) of interactions in that period
+      - Engagement   <- % of customers with >=1 interaction in that period
       - Task_Success <- % of tickets CREATED in that period that are now
         Resolved/Closed
 
-    Returns oldest -> newest arrays, one point per week/month, so charting
-    libraries can plot them directly left-to-right.
+    Arrays come back oldest -> newest so a chart can plot them straight
+    through left to right.
     """
     total_customers = db.query(Customer).count() or 1
 
@@ -308,7 +300,6 @@ def heart_trend(db: Session, weeks: int = 8, months: int = 6) -> dict:
             cursor = today.date().replace(day=1)
             for _ in range(num_periods):
                 period_keys.append(cursor)
-                # step back one month
                 prev_month = (cursor.replace(day=1) - timedelta(days=1)).replace(day=1)
                 cursor = prev_month
             period_keys = list(reversed(period_keys))
@@ -367,10 +358,10 @@ def heart_trend(db: Session, weeks: int = 8, months: int = 6) -> dict:
     }
 
 
-# ─── Per-agent / per-category / per-channel breakdowns (Feature 5) ────────────
+# ── Per-agent / per-category / per-channel breakdowns ──
 
 def heart_by_agent(db: Session) -> list:
-    """Task Success + avg resolution time per assigned support agent."""
+    """Task Success and avg resolution time, grouped by assigned support agent."""
     rows = db.query(
         Ticket.assigned_agent, Ticket.status, Ticket.created_at, Ticket.resolved_at
     ).all()
@@ -403,7 +394,7 @@ def heart_by_agent(db: Session) -> list:
 
 
 def heart_by_category(db: Session) -> list:
-    """Task Success + volume per ticket category."""
+    """Task Success and volume, grouped by ticket category."""
     rows = db.query(Ticket.category, Ticket.status).all()
     by_category = defaultdict(list)
     for category, status in rows:
@@ -425,7 +416,7 @@ def heart_by_category(db: Session) -> list:
 
 
 def heart_by_channel(db: Session) -> list:
-    """Happiness signal (avg CSAT/sentiment) per interaction channel."""
+    """Avg sentiment/CSAT per interaction channel - a rough Happiness signal by channel."""
     rows = db.query(Interaction.channel, Interaction.sentiment, Interaction.csat_score).all()
     by_channel = defaultdict(lambda: {"sentiments": [], "csats": [], "count": 0})
     for channel, sentiment, csat in rows:
@@ -449,13 +440,10 @@ def heart_by_channel(db: Session) -> list:
     return results
 
 
-# ─── System report metadata (Feature 10) ──────────────────────────────────────
+# ── Metric metadata for the system report ──
 
 def get_heart_metric_metadata() -> dict:
-    """
-    Machine-readable metric definitions/formulas/signal sources/business
-    justification for the HEART dashboard, for the final System Report.
-    """
+    """Formulas/sources/justification for each HEART metric, so the write-up doesn't have to reverse-engineer them from the code."""
     return {
         "Happiness": {
             "formula": "avg(CSAT normalised to 0-100) averaged with avg(per-customer 0-10 rating normalised to 0-100)",

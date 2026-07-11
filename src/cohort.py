@@ -9,7 +9,7 @@ from typing import Optional
 from src.models import Customer, Ticket, Interaction
 
 
-# ─── Churn Scoring ────────────────────────────────────────────────────────────
+# ── Churn scoring ──
 
 def compute_churn_score(
     customer,
@@ -22,39 +22,32 @@ def compute_churn_score(
     days_since_last_interaction: Optional[int] = None,
 ) -> tuple:
     """
-    Multi-signal, weighted churn probability score (0-100), plus the list of
-    human-readable reasons that contributed to it. Higher score = more
-    likely to churn.
+    Rule-based churn risk score, 0-100 (capped), plus the list of reasons
+    that fed into it. Higher = more likely to churn.
 
-    NOTE ON WEIGHTS: the weights below are heuristic, hand-picked values,
-    not statistically fitted from labeled churn outcomes. They're a
-    reasonable starting point for a demo/dashboard, but should be called
-    out as heuristic (not learned) in any write-up, and revisited with
-    real churn-outcome data if this graduates beyond a demo.
+    These weights are hand-picked, not fitted on real churn outcomes -
+    they're a reasonable starting point for a demo, but should be called
+    out as heuristic (not learned) anywhere this gets written up, and
+    revisited if real labelled churn data ever becomes available.
 
-    Signals (weights sum to slightly over 100 by design, so multiple
-    overlapping risk factors compound; the final score is capped at 100):
-      - Low engagement score              -> +25  "Low engagement score"
-      - Low/detractor NPS (<=6)           -> +15  "Low NPS (detractor/passive)"
-      - Negative average sentiment        -> +15  "Negative average sentiment"
-      - Low average CSAT (<3.0)           -> +10  "Low average CSAT"
-      - No recent activity (60+ days,
-        or no interactions at all)        -> +15  "No recent activity"
-      - Any escalated ticket(s)           -> +15  "Escalated ticket(s) on file"
-      - Multiple open tickets (>=3)       -> +10  "Multiple open tickets"
-      - High ticket volume (>5) AND
-        negative sentiment                -> +5   "High ticket volume with negative sentiment"
+    Rough point breakdown (they intentionally sum to a bit over 100, so
+    several overlapping risk factors can compound - the total is capped
+    at 100 either way):
+      - Low engagement score                    -> up to +30
+      - Low/detractor NPS                       -> up to +25
+      - Negative average sentiment               -> up to +20
+      - Low average CSAT                         -> up to +15
+      - No recent activity / no interactions     -> up to +20
+      - Escalated ticket(s) on file               -> up to +20
+      - Multiple open tickets                     -> up to +15
+      - High ticket volume + negative sentiment   -> +10
 
-    High ticket volume alone is NOT used as a standalone risk signal: a
-    heavy support user with strong NPS/CSAT/engagement (e.g. a large
-    Enterprise account) is often a highly engaged customer, not a churn
-    risk. It only contributes when paired with negative sentiment, which
-    is what actually distinguishes "frustrated repeat contact" from
-    "engaged power user."
-
-    tickets_count / interactions_count are kept as explicit parameters (as
-    in the original signature) for backward compatibility with any other
-    callers, even though the richer signals above now carry more weight.
+    High ticket volume by itself is deliberately NOT a risk signal - a
+    heavy support user with good NPS/CSAT/engagement (think: a big
+    Enterprise account) is usually just an engaged customer, not someone
+    about to leave. It only counts here when paired with negative
+    sentiment, which is what actually separates "frustrated repeat
+    contact" from "engaged power user".
     """
     score = 0
     reasons = []
@@ -119,9 +112,6 @@ def compute_churn_score(
         score += 10
         reasons.append("Very low interaction history")
 
-    # High volume alone isn't a risk signal (see docstring) - only counts
-    # when it co-occurs with negative sentiment, i.e. repeated frustrated
-    # contact rather than healthy heavy usage.
     if tickets_count > 5 and avg_sentiment is not None and avg_sentiment < -0.2:
         score += 10
         reasons.append("High ticket volume with negative sentiment")
@@ -132,26 +122,24 @@ def compute_churn_score(
     return min(score, 100), reasons
 
 
-# ─── Retention Curve Approximation ────────────────────────────────────────────
+# ── Retention curve approximation ──
 
 def _approximate_retention_curve(retention_rate: float, months_since: int) -> list:
     """
-    Approximates a monthly retention curve for a cohort without historical
-    status snapshots.
+    Estimates a monthly retention curve for a cohort even though we don't
+    have historical status snapshots to draw a real one from.
 
-    LIMITATION (call this out explicitly in any report/demo): we only store
-    each customer's CURRENT status, not their status at every past month,
-    so this curve is an ESTIMATE, not an exact historical reconstruction.
-    The previous approach (straight-line interpolation between 100% and the
-    current rate) doesn't match how retention actually behaves - real
-    products lose more customers early and level off later, producing an
-    "L-shaped" decay, not a straight line.
+    Worth being upfront about this limitation whenever it shows up in a
+    report: we only know each customer's CURRENT status, not their status
+    at every past month, so this is an approximation, not a reconstruction
+    of what actually happened.
 
-    Approximation used here: geometric (compound) monthly decay, calibrated
-    so the curve lands exactly on the cohort's known, real current
-    retention_rate at month `months_since`. This is the best realistic
-    approximation available from current-status-only data - it is NOT a
-    substitute for actual monthly retention snapshots.
+    A straight line from 100% down to the current rate doesn't look like
+    real retention curves (which tend to drop fast early and level off),
+    so instead we fit a geometric (compound) monthly decay that lands
+    exactly on the cohort's real, current retention_rate at its actual
+    age in months. It's the best shape we can infer from current-status
+    data alone - not a substitute for real monthly snapshots.
     """
     months_since = max(months_since, 0)
 
@@ -180,10 +168,8 @@ def get_behavioral_tag(
     churn_score: float,
 ):
     """
-    Assign a behavioral cohort using existing CRM signals.
-
-    No database fields are added.
-    The tag is computed dynamically.
+    Labels a customer with a rough behavioural tag using signals we
+    already have - no new fields needed, it's computed on the fly.
     """
 
     engagement = customer.engagement_score or 0
@@ -209,24 +195,23 @@ def get_behavioral_tag(
 
     return "Standard"
 
-# ─── Cohort Analysis ──────────────────────────────────────────────────────────
+# ── Cohort analysis ──
 
 def cohort_analysis(db: Session) -> list:
     """
-    Segments customers by signup month and computes:
-    - retention rate
-    - churn rate
-    - per-customer, multi-signal churn scores (with reasons)
-    - retention curve (geometric-decay approximation of monthly survival)
+    Groups customers by signup month and, for each cohort, computes
+    retention rate, churn rate, per-customer churn scores (with reasons),
+    and an approximated retention curve.
 
-    All per-customer signals (ticket counts by status, sentiment/CSAT
-    averages, last interaction recency) are computed from batched, grouped
-    queries up front - no query is issued inside the per-customer loop.
+    All the per-customer inputs (ticket status counts, sentiment/CSAT
+    averages, last-interaction recency) come from batched, grouped
+    queries up front - nothing gets queried inside the per-customer loop
+    below.
     """
 
     customers = db.query(Customer).all()
 
-    # ── Batch queries to avoid N+1 problems ───────────────────────────────────
+    # ── Batched lookups so the loop below doesn't hit the DB per customer ──
     ticket_counts = dict(
         db.query(Ticket.customer_id, func.count(Ticket.id))
         .group_by(Ticket.customer_id)
@@ -249,7 +234,7 @@ def cohort_analysis(db: Session) -> list:
     for customer_id, ticket_status, count in ticket_status_rows:
         ticket_status_counts[customer_id][ticket_status] = count
 
-    # Sentiment / CSAT / recency aggregates per customer, in one query.
+    # Sentiment / CSAT / last-seen, all in one grouped query per customer.
     interaction_agg_rows = (
         db.query(
             Interaction.customer_id,
@@ -269,7 +254,7 @@ def cohort_analysis(db: Session) -> list:
         for customer_id, avg_sentiment, avg_csat, last_ts in interaction_agg_rows
     }
 
-    # ── Group into cohorts by signup month ────────────────────────────────────
+    # ── Group customers into signup-month cohorts ──
     cohorts: dict = defaultdict(list)
     for customer in customers:
         cohort_month = customer.signup_date.strftime("%Y-%m")
@@ -288,7 +273,7 @@ def cohort_analysis(db: Session) -> list:
         retention_rate = round(active_customers / total_customers * 100, 2)
         churn_rate = round(churned_customers / total_customers * 100, 2)
 
-        # ── Per-customer churn scores ──────────────────────────────────────────
+        # ── Score every customer in this cohort ──
         customer_scores = []
         churn_windows = {
             "0-30 Days": 0,
@@ -327,7 +312,8 @@ def cohort_analysis(db: Session) -> list:
                 days_since_last_interaction=days_since_last_interaction,
             )
             if customer.status == "Churned":
-
+                # Bucket by how old the account was when it churned - shows
+                # whether churn is mostly happening early or late.
                 if customer_age <= 30:
                     churn_windows["0-30 Days"] += 1
 
@@ -367,7 +353,7 @@ def cohort_analysis(db: Session) -> list:
                 "churn_reasons": churn_reasons,
             })
 
-        # ── Retention curve: geometric-decay survival approximation ───────────
+        # ── Retention curve for this cohort ──
         cohort_signup = date.fromisoformat(cohort_month + "-01")
         months_since = (date.today() - cohort_signup).days // 30
         retention_curve = _approximate_retention_curve(retention_rate, months_since)
@@ -401,35 +387,24 @@ def cohort_analysis(db: Session) -> list:
     return analysis
 
 
-# ─── Re-engagement Rate (new) ─────────────────────────────────────────────────
+# ── Re-engagement rate ──
 
 def re_engagement_analysis(db: Session, inactivity_threshold_days: int = 30) -> dict:
     """
-    Re-engagement Rate: customers who went quiet for more than
-    `inactivity_threshold_days` (no interaction logged in that window) and
-    then had at least one interaction AFTER that silent gap - i.e. they
-    "came back".
+    Finds customers who went quiet for more than `inactivity_threshold_days`
+    and then came back with at least one more interaction afterward.
 
-    DATA AVAILABILITY NOTE: we don't store periodic activity snapshots, only
-    a timestamped interaction log per customer. So "inactive then active
-    again" is detected as: sort a customer's interaction timestamps, and
-    check whether any consecutive pair is more than
-    `inactivity_threshold_days` apart. If so, that customer re-engaged (the
-    interaction that ends the gap is the "came back" event). Customers with
-    fewer than 2 interactions can't exhibit this pattern and are excluded
-    from the denominator, since there's no gap to measure.
+    We don't store periodic activity snapshots, just a timestamped
+    interaction log per customer - so "went inactive, then came back" gets
+    detected by sorting each customer's interaction timestamps and
+    checking whether any consecutive pair is further apart than the
+    threshold. If so, the interaction that closes that gap counts as a
+    "re-engagement" event. Customers with fewer than 2 interactions can't
+    show this pattern at all, so they're excluded from the denominator
+    rather than silently counted as "not re-engaged".
 
-    Single query for all interactions (grouped in Python), not one query per
-    customer, to avoid N+1.
-
-    Returns:
-        {
-          "inactivity_threshold_days": int,
-          "eligible_customers": int,      # customers with >= 2 interactions
-          "re_engaged_count": int,
-          "re_engagement_rate_pct": float,
-          "customer_ids": [int, ...],
-        }
+    Pulls every interaction in a single query and does the grouping in
+    Python, rather than issuing one query per customer.
     """
     rows = (
         db.query(Interaction.customer_id, Interaction.timestamp)
@@ -454,7 +429,7 @@ def re_engagement_analysis(db: Session, inactivity_threshold_days: int = 30) -> 
         for earlier, later in zip(timestamps, timestamps[1:]):
             if (later - earlier) > threshold:
                 re_engaged_ids.append(customer_id)
-                break  # one qualifying gap is enough to count this customer
+                break  # one qualifying gap is enough - no need to keep scanning
 
     rate = round((len(re_engaged_ids) / eligible * 100), 2) if eligible else 0.0
 
@@ -467,14 +442,10 @@ def re_engagement_analysis(db: Session, inactivity_threshold_days: int = 30) -> 
     }
 
 
-# ─── System report metadata (Feature 10) ──────────────────────────────────────
+# ── Metric metadata for the system report ──
 
 def get_cohort_metric_metadata() -> dict:
-    """
-    Machine-readable metadata describing every metric this module produces -
-    intended for the final System Report, so definitions/formulas/signal
-    sources don't have to be re-derived by hand from the code.
-    """
+    """Formulas/sources/justification for each cohort metric, for the write-up."""
     return {
         "retention_rate": {
             "formula": "active_customers / total_customers * 100 (per signup-month cohort)",
@@ -504,21 +475,20 @@ def get_cohort_metric_metadata() -> dict:
     }
 
 
-# ─── PDF Export (Feature 4, uses ReportLab) ───────────────────────────────────
+# ── PDF export ──
 
 def export_cohort_pdf(db: Session, heart_metrics_fn=None) -> bytes:
     """
-    Renders the same cohort analysis already returned by /api/v1/cohorts/analysis
-    and /api/v1/export/cohort as a PDF report, in addition to (not instead of)
-    the existing JSON export.
+    Renders the same cohort analysis from cohort_analysis() (also exposed
+    as JSON via /cohorts/analysis and /export/cohort) as a PDF report -
+    on top of the JSON export, not replacing it.
 
-    `heart_metrics_fn` is optionally injected (pass `heart.heart_metrics`) so
-    this module doesn't need a hard import dependency on heart.py; if not
-    provided, the HEART section is simply omitted.
+    `heart_metrics_fn` is passed in (pass heart.heart_metrics) rather than
+    imported directly, so this module doesn't need a hard dependency on
+    heart.py. If it's not provided, the HEART section is just skipped.
 
-    Returns raw PDF bytes - the caller (FastAPI route) is responsible for
-    wrapping these in a StreamingResponse/Response with the right
-    content-type, so this stays a pure, framework-agnostic function.
+    Returns raw PDF bytes - it's on the caller (the FastAPI route) to wrap
+    this in a StreamingResponse with the right content-type.
     """
     from reportlab.lib.pagesizes import letter
     from reportlab.lib.units import inch
@@ -546,7 +516,7 @@ def export_cohort_pdf(db: Session, heart_metrics_fn=None) -> bytes:
     story.append(Paragraph(f"Generated: {datetime.utcnow().isoformat()} UTC", styles["Normal"]))
     story.append(Spacer(1, 0.25 * inch))
 
-    # ── Cohort summary table ────────────────────────────────────────────────
+    # ── Cohort summary table ──
     story.append(Paragraph("Cohort Summary", styles["Heading2"]))
     table_data = [["Cohort", "Total", "Active", "Churned", "Retention %", "Churn %", "High Risk"]]
     for c in cohorts:
@@ -565,7 +535,7 @@ def export_cohort_pdf(db: Session, heart_metrics_fn=None) -> bytes:
     story.append(cohort_table)
     story.append(Spacer(1, 0.25 * inch))
 
-    # ── Re-engagement ────────────────────────────────────────────────────────
+    # ── Re-engagement ──
     story.append(Paragraph("Re-engagement", styles["Heading2"]))
     story.append(Paragraph(
         f"{re_engagement['re_engaged_count']} of {re_engagement['eligible_customers']} "
@@ -576,7 +546,7 @@ def export_cohort_pdf(db: Session, heart_metrics_fn=None) -> bytes:
     ))
     story.append(Spacer(1, 0.25 * inch))
 
-    # ── HEART metrics (optional) ────────────────────────────────────────────
+    # ── HEART metrics (skipped if heart_metrics_fn wasn't passed in) ──
     if heart_metrics_fn is not None:
         try:
             heart = heart_metrics_fn(db)
@@ -594,11 +564,12 @@ def export_cohort_pdf(db: Session, heart_metrics_fn=None) -> bytes:
             story.append(heart_table)
             story.append(Spacer(1, 0.25 * inch))
         except Exception:
-            # PDF export must never fail just because HEART computation did;
-            # the JSON endpoints remain the authoritative source for HEART.
+            # A broken HEART calculation shouldn't take down the whole PDF
+            # export - the JSON endpoints are still the source of truth for
+            # HEART numbers, so we just drop this section and move on.
             pass
 
-    # ── Top industries ──────────────────────────────────────────────────────
+    # ── Top industries ──
     industry_counts: dict = defaultdict(int)
     for customer in db.query(Customer).all():
         industry_counts[customer.industry or "Unknown"] += 1

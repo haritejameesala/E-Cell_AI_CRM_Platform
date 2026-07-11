@@ -34,6 +34,9 @@ def _summary(values: Iterable[float]) -> dict:
 
 
 def time_to_first_resolution_by_cohort(db: Session) -> list:
+    # Only the FIRST resolved ticket per customer counts here - that's why
+    # we sort by resolved_at and skip a customer_id once we've already
+    # recorded one for them.
     rows = (
         db.query(Customer.signup_date, Ticket.customer_id, Ticket.created_at, Ticket.resolved_at)
         .join(Ticket, Ticket.customer_id == Customer.id)
@@ -110,6 +113,10 @@ def resolution_metrics_by_agent(db: Session) -> list:
         if ticket.status == "Escalated":
             grouped[agent]["escalations"] += 1
 
+    # CSAT/sentiment/NPS aren't linked to agents directly (interactions
+    # only reference customers, not agents), so we approximate "this
+    # agent's customer sentiment" by pooling stats across every customer
+    # they've handled a ticket for.
     interaction_rows = db.query(Interaction.customer_id, Interaction.csat_score, Interaction.sentiment).all()
     customer_rows = db.query(Customer.id, Customer.nps_score).all()
     csat_by_customer = defaultdict(list)
@@ -167,6 +174,7 @@ def configurable_cohorts(db: Session, group_by: str = "signup") -> dict:
 
 
 def expanded_heart_metrics(db: Session) -> dict:
+    """Deeper breakdowns behind the top-level HEART numbers - per-cohort CSAT, weekly active users, survival trend, etc."""
     cohort_rows = cohort_analysis(db)
     interactions = db.query(Interaction).all()
     tickets = db.query(Ticket).all()
@@ -197,6 +205,8 @@ def expanded_heart_metrics(db: Session) -> dict:
     total_customers = len(customers) or 1
     resolved = sum(1 for t in tickets if t.status in RESOLVED_STATUSES)
     escalated = sum(1 for t in tickets if t.status == "Escalated")
+    # No column distinguishes an AI-resolved ticket from a human-resolved
+    # one, so we use the "_Team" suffix on assigned_agent as a stand-in.
     ai_resolved = sum(1 for t in tickets if t.status in RESOLVED_STATUSES and (t.assigned_agent or "").endswith("_Team"))
 
     return {
@@ -231,6 +241,14 @@ def expanded_heart_metrics(db: Session) -> dict:
 
 
 def agent_quality_metrics(db: Session, latency_events: Optional[list] = None) -> dict:
+    """
+    Rough, explainable estimate of how well-grounded the AI agent's
+    answers are likely to be, based on how much usable CRM context exists
+    per customer. This is NOT a supervised evaluation score - we don't
+    have human-labelled "was this answer good" data to train on, so this
+    is the honest substitute: how much data did the agent actually have
+    to work with.
+    """
     customers = db.query(Customer).all()
     tickets = db.query(Ticket).all()
     interactions = db.query(Interaction).all()
@@ -371,6 +389,12 @@ def agent_quality_metrics(db: Session, latency_events: Optional[list] = None) ->
 
 
 def cohort_evaluation(db: Session, threshold: int = 70) -> dict:
+    """
+    Treats Customer.status == "Churned" as ground truth and churn_score >=
+    threshold as the prediction, then computes standard classification
+    metrics against that. Useful for sanity-checking whether the churn
+    heuristic is actually pointing at the right accounts.
+    """
     cohorts = cohort_analysis(db)
     tp = fp = tn = fn = coverage_count = total = 0
     for cohort in cohorts:

@@ -1,31 +1,26 @@
 """
-Reusable, rule-based customer segmentation helpers.
+Generic, rule-based customer segmentation.
 
-Design goal (per task spec): support many segmentation dimensions
-(industry, tier, engagement, tenure, ticket frequency, status, NPS,
-churn risk) WITHOUT duplicating the "loop over customers + bucket them +
-compute aggregates" logic eight times.
+The goal here was to support a bunch of segmentation dimensions (industry,
+tier, engagement, tenure, ticket frequency, status, NPS, churn risk)
+without writing the same "loop over customers, bucket them, average the
+numbers" logic eight separate times.
 
-How it works
-------------
-1. `_bucket_functions` maps a dimension name -> a small pure function that
-   takes a "customer row + precomputed signals" dict and returns the bucket
-   label (a string) that customer belongs to for that dimension.
-2. `segment_customers(db, dimension, ...)` does all the DB work ONCE
-   (batched, no N+1 - see the queries below), builds one enriched dict per
-   customer, then delegates only the "which bucket does this go in" step to
-   the small per-dimension function above.
+How it's structured:
+1. `_bucket_functions` maps a dimension name to a small function that
+   takes one customer's precomputed signals and returns which bucket
+   they fall into for that dimension.
+2. `segment_customers()` does all the DB work up front in a handful of
+   batched queries (no N+1), builds one signals dict per customer, and
+   then just calls the right bucket function per customer.
 
-This means adding a NEW segmentation dimension in the future is a ~5 line
-addition (one bucket function), not a new copy of the whole endpoint.
+Adding a new dimension later is a ~5-line function, not a new copy of the
+whole segmentation loop.
 
-Backward compatibility
-----------------------
-`crm.get_customer_segments()` (the original industry-only segmentation used
-by GET /api/v1/customers/segments/by-industry) is preserved unchanged and
-is NOT touched by this module. The new generic engine is exposed via a new
-endpoint (GET /api/v1/customers/segments/{dimension}) so no existing
-response shape changes.
+Note: crm.get_customer_segments() (the original industry-only version used
+by GET /customers/segments/by-industry) is untouched by this module - it's
+kept separate on purpose so that route's response shape never changes.
+This module powers the newer GET /customers/segments/{dimension} route.
 """
 
 from collections import defaultdict
@@ -44,16 +39,16 @@ VALID_DIMENSIONS = [
 ]
 
 
-# ─── Per-customer signal enrichment (single batched pass, no N+1) ─────────────
+# ── Build per-customer signals in one batched pass (no N+1) ──
 
 def _build_customer_signals(db: Session) -> Dict[int, dict]:
     """
-    Computes every signal every segmentation dimension might need, in a
-    small fixed number of batched/grouped queries (independent of customer
-    count), and returns {customer_id: signals_dict}.
+    Computes everything any bucket function might need, using a small
+    fixed number of grouped queries (independent of how many customers
+    there are), then returns {customer_id: signals_dict}.
 
-    This is the ONLY place that talks to the DB for segmentation - every
-    bucket function below operates purely on the in-memory dict it returns.
+    This is the only place that talks to the DB - every bucket function
+    below just reads from the dict this returns.
     """
     customers = db.query(Customer).all()
 
@@ -135,7 +130,7 @@ def _build_customer_signals(db: Session) -> Dict[int, dict]:
     return signals
 
 
-# ─── Bucket functions (one small pure function per dimension) ─────────────────
+# ── Bucket functions - one small function per dimension ──
 
 def _bucket_industry(s: dict) -> str:
     return s["customer"].industry or "Unknown"
@@ -212,22 +207,13 @@ _BUCKET_FUNCTIONS: Dict[str, Callable[[dict], str]] = {
 }
 
 
-# ─── Public entry point ────────────────────────────────────────────────────────
+# ── Public entry point ──
 
 def segment_customers(db: Session, dimension: str) -> dict:
     """
-    Generic, rule-based segmentation across any of VALID_DIMENSIONS.
-
-    Returns:
-        {
-          "dimension": "<dimension>",
-          "segments": [
-            {"segment": "<bucket label>", "total_customers": int,
-             "avg_engagement": float, "active_count": int,
-             "churned_count": int, "avg_churn_score": float}
-            , ...
-          ]
-        }
+    Segments every customer along the given dimension and returns bucket
+    counts plus a couple of aggregates per bucket (avg engagement, avg
+    churn score, active/churned counts).
     """
     bucket_fn = _BUCKET_FUNCTIONS.get(dimension)
     if bucket_fn is None:

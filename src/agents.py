@@ -8,7 +8,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ─── Ollama Config ────────────────────────────────────────────────────────────
 OLLAMA_URL   = os.getenv("OLLAMA_URL", "http://localhost:11434")
 MODEL        = os.getenv("OLLAMA_MODEL", "llama3")
 AGENT_ID     = f"ollama-{MODEL}"
@@ -19,20 +18,16 @@ REFUSAL_PHRASES = [
 ]
 
 
-# ─── Core Ollama Call ─────────────────────────────────────────────────────────
 
 def ollama_generate(prompt: str) -> dict:
-    """
-    Send a prompt to Ollama and return the full response dict
-    including logprobs for confidence scoring.
-    """
+
     try:
         response = requests.post(
             f"{OLLAMA_URL}/api/generate",
             json={
                 "model":    MODEL,
                 "prompt":   prompt,
-                "logprobs": True,      # enables token-level log probabilities
+                "logprobs": True,   
                 "stream":   False
             },
             timeout=120
@@ -51,18 +46,7 @@ def ollama_generate(prompt: str) -> dict:
 # ─── True Confidence via Logprobs ─────────────────────────────────────────────
 
 def compute_confidence_logprobs(token_logprobs: list) -> float:
-    """
-    True model confidence — directly from token-level log probabilities.
 
-    Method: Geometric mean of per-token probabilities.
-    - Each logprob converted to prob via e^logprob
-    - Geometric mean chosen over arithmetic mean because:
-      a single uncertain token (prob=0.02) should lower overall
-      confidence — arithmetic mean hides this, geometric mean
-      correctly penalises it.
-
-    Returns: float 0.0 to 100.0
-    """
     if not token_logprobs:
         return 0.0
 

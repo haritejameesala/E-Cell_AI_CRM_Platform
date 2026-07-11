@@ -6,7 +6,7 @@ from typing import Optional
 from src.models import Interaction, Customer, Ticket
 
 
-# ─── Customer Health Scoring ──────────────────────────────────────────────────
+# ── Customer health scoring ──
 
 def _determine_health_label(
     engagement_score: Optional[float],
@@ -16,15 +16,14 @@ def _determine_health_label(
     recent_30d_interactions: int,
 ) -> str:
     """
-    Rule-based customer health label derived from engagement score, NPS,
-    interaction sentiment, escalation volume, and recent activity.
+    Buckets a customer into Healthy / Needs Attention / High Risk based on
+    engagement, NPS, sentiment, escalations, and recent activity.
 
-    - "High Risk"       : low engagement, a detractor NPS (<=3), strongly
-                           negative sentiment, or 2+ escalated tickets.
-    - "Needs Attention"  : moderate warning signs (a passive/borderline NPS,
-                           mild negative sentiment, any escalation, or no
-                           activity in 30 days).
-    - "Healthy"         : none of the above risk signals present.
+    High Risk needs a real red flag: low engagement, a detractor NPS
+    (<=3), clearly negative sentiment, or 2+ escalations. Needs Attention
+    catches the softer warning signs - a passive NPS, mildly negative
+    sentiment, a single escalation, or just going quiet for 30 days.
+    Everything else is Healthy.
     """
     engagement_score = engagement_score if engagement_score is not None else 50.0
 
@@ -50,23 +49,17 @@ def _determine_health_label(
 
 def get_customer_memory(customer_id: int, db: Session) -> dict:
     """
-    Returns two-layer memory for a customer:
-    - short_term: last 5 interactions (for immediate context)
-    - long_term_summary: aggregated behavioural summary across all history
+    Builds the two-layer memory dict the agent uses for a customer:
+    - short_term: last 5 interactions, for immediate context
+    - long_term_summary: a plain-English rollup of their behaviour overall
 
-    Enriched (new, additive fields - existing fields are unchanged) with
-    ticket-history signals so downstream consumers (e.g. the AI agent) get
-    a fuller picture without needing a separate query of their own:
-      - most_common_ticket_category / most_common_ticket_priority (historical pattern)
-      - latest_ticket_category / latest_ticket_priority (the newest ticket only)
-      - open_tickets / resolved_tickets / escalated_tickets / total_tickets
-      - latest_ticket_title / latest_ticket_status / latest_resolution_date
-      - customer_health ("Healthy" / "Needs Attention" / "High Risk"),
-        derived from engagement score, NPS, sentiment, escalations, and
-        recent activity
+    Also folds in ticket-history stats (open/resolved/escalated counts,
+    most common category, latest ticket details, health label) so
+    whatever calls this doesn't have to go query tickets separately.
 
-    Only two queries are made regardless of history size (one for
-    interactions, one for tickets) - no N+1 behaviour.
+    Only two queries total regardless of how much history a customer has
+    - one for interactions, one for tickets - so this doesn't turn into an
+    N+1 as history grows.
     """
 
     all_interactions = (
@@ -76,7 +69,6 @@ def get_customer_memory(customer_id: int, db: Session) -> dict:
         .all()
     )
 
-    # ── Ticket history (single query, newest first) ────────────────────────
     all_tickets = (
         db.query(Ticket)
         .filter(Ticket.customer_id == customer_id)
@@ -119,15 +111,14 @@ def get_customer_memory(customer_id: int, db: Session) -> dict:
         "most_common_ticket_priority": most_common_priority,
         "latest_ticket_title": latest_ticket_title,
         "latest_ticket_status": latest_ticket_status,
-        # Distinct from most_common_ticket_category/priority above - these
-        # describe the single newest ticket, not the customer's historical
-        # pattern. Keeping both avoids the "latest" vs "most common" mixup.
+        # "latest" describes just the newest ticket; "most_common" describes
+        # the pattern across their whole history - keeping them separate
+        # avoids mixing up "what just happened" with "what usually happens".
         "latest_ticket_category": latest_ticket_category,
         "latest_ticket_priority": latest_ticket_priority,
         "latest_resolution_date": latest_resolution_date,
-        # Additive: real DB id of the latest ticket, needed so downstream
-        # consumers (agents.py source-citation logic) can cite a concrete,
-        # existing record like "Ticket #381" instead of just its title.
+        # Real DB id so callers (agent source citations) can point at an
+        # actual ticket instead of just quoting its title.
         "latest_ticket_id": latest_ticket.id if latest_ticket else None,
     }
 
@@ -147,12 +138,9 @@ def get_customer_memory(customer_id: int, db: Session) -> dict:
             **ticket_fields,
         }
 
-    # ── Short-term: last 5 interactions ───────────────────────────────────────
+    # ── Short-term: last 5 interactions ──
     short_term = [
         {
-            # Additive: real DB id of this interaction, so downstream
-            # consumers (agents.py source-citation logic) can cite it
-            # unambiguously as an existing record.
             "interaction_id": i.id,
             "channel": i.channel,
             "message": i.message,
@@ -163,14 +151,12 @@ def get_customer_memory(customer_id: int, db: Session) -> dict:
         for i in all_interactions[:5]
     ]
 
-    # ── Long-term: aggregated behaviour summary ────────────────────────────────
+    # ── Long-term: behaviour summary across everything ──
     total = len(all_interactions)
 
-    # Channel breakdown
     channel_counts = Counter(i.channel for i in all_interactions)
     preferred_channel = channel_counts.most_common(1)[0][0]
 
-    # Sentiment trend
     sentiments = [i.sentiment for i in all_interactions if i.sentiment is not None]
     avg_sentiment = round(sum(sentiments) / len(sentiments), 2) if sentiments else 0
     sentiment_label = (
@@ -179,16 +165,13 @@ def get_customer_memory(customer_id: int, db: Session) -> dict:
         else "neutral"
     )
 
-    # CSAT trend
     csat_scores = [i.csat_score for i in all_interactions if i.csat_score is not None]
     avg_csat = round(sum(csat_scores) / len(csat_scores), 2) if csat_scores else None
 
-    # Recency
     latest = all_interactions[0].timestamp
     oldest = all_interactions[-1].timestamp
     span_days = (latest - oldest).days if latest and oldest else 0
 
-    # 30-day activity
     thirty_days_ago = datetime.now() - timedelta(days=30)
     recent_count = sum(
         1 for i in all_interactions
